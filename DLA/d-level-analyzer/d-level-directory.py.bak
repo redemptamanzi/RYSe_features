@@ -1,0 +1,1046 @@
+"""
+program usage:
+python d-level-directory.py path-to-directory
+"""
+
+# =======================================================================
+import os
+import sys
+import string
+import re
+import glob
+
+# =======================================================================
+# this part extracts information from entries in NOMLEX
+# identifies a list of nominalized forms, singular and plural (nomdict)
+# extracts a list of subjects for each nominalized form (nomsubj)
+# extracts a list of objects for each nominalized form (nomobj)
+# extracts a list of forms that incorporate subject role (nosubj)
+# extracts a list of forms that incorporate object role (noobj)
+
+infile = open("NOMLEX-2001.reg", "r")
+line = infile.read()
+infile.close()
+
+nomdict = {}
+nomsubj = {}
+nomobj = {}
+nosubj = {}
+noobj = {}
+
+# each entry begins with "(NOM"; break file into a list of entries
+entrylist = line.split("(NOM ")
+# pop out first empty element
+entrylist.pop(0)
+
+# eliminate spaces and punctuation marks at the beginning/ending of string
+
+
+def stripS(s):
+    return s.strip().strip(string.punctuation)
+
+# retrieve list of possible subjects and objects of the nominal
+# each PVALUE is retrieved separately, e.g., PP-of, PP-by, etc.
+
+
+def getSubc(feature):
+    subclist = []
+    feature = stripS(feature)
+    flist = feature.split("\n")
+    for x in flist:
+        x = stripS(x)
+        if "PP" in x:
+            plist = x.split()
+            preps = plist[-1].split()
+            for p in preps:
+                subclist.append("PP-"+stripS(p))
+        elif not "NON" in x and x != "":
+            subclist.append(x)
+    return subclist
+
+# add elements in list b to list a
+
+
+def updateList(a, b):
+    for x in b:
+        if x not in a:
+            a.append(x)
+    return a
+
+
+# process entries one by one
+for entry in entrylist:
+    entry = stripS(entry)
+    # delimiter of different features
+    delimiter = "\n"+" "*5+":"
+    # list of features in entry
+    features = entry.split(delimiter)
+    plural = ""
+    singular = ""
+    # see NOMLEX manual
+    # subject meaning nominal incorporates subject role
+    subject = 0
+    object = 0
+    # subject and object list of the nominal
+    nomsubjs = []
+    nomobjs = []
+    for feature in features:
+        feature = stripS(feature)
+        if "ORTH " in feature:
+            flist = feature.split()
+            singular = stripS(flist[1])
+        elif "PLURAL " in feature:
+            flist = feature.split()
+            temp = stripS(flist[1])
+            if temp != "NONE" and temp != "none":
+                plural = temp
+        elif "SINGULAR-FALSE" in feature:
+            singular = ""
+        elif string.find(feature, "SUBJECT") == 0:
+            subject = 1
+        elif string.find(feature, "OBJECT") == 0:
+            object = 1
+        elif "VERB-SUBJ" in feature:
+            # VERB-SUBJ: DET-POSS, PP-p, or N-N-MOD
+            feature = feature[9:]
+            nomsubjs = updateList(nomsubjs, getSubc(feature))
+        elif "VERB-SUBC" in feature:
+            flist = feature.split("(NOM-")
+            for x in flist[1:]:
+                xlist = x.split("  :")
+                for y in xlist:
+                    if string.find(y, "OBJECT") == 0:
+                        y = y[6:]
+                        nomobjs = updateList(nomobjs, getSubc(y))
+
+    for form in (singular, plural):
+        if form:
+            nomdict[form] = 1
+            if nomsubjs:
+                nomsubj[form] = nomsubjs
+            if nomobjs:
+                nomobj[form] = nomobjs
+            if subject:
+                nosubj[form] = 1
+            if object:
+                noobj[form] = 1
+
+# =======================================================================
+# nodes are either terminal or non-terminal in parse tree
+# function to check if a node is a non-terminal node (head)
+# non-terminal node has format: Catetory~lexical~1~2~3~4
+
+
+def isHead(node):
+    if "~" in node and len(node.split("~")) == 6:
+        return 1
+    return 0
+
+# retrives the terminal node corresponding to the headword of the node
+
+
+def getTerminal(node):
+    while isHead(node):
+        node = getHead(node)
+    return node
+
+# retrieve a node's POS or phrasal category
+
+
+def getCat(node):
+    if isHead(node):
+        return node.split("~")[0]
+    return node.split("/")[-1]
+
+# retrieve a node's lexical item
+
+
+def getLex(node):
+    if isHead(node):
+        return node.split("~")[1]
+    return node.split("/")[0]
+
+# retrieve position of head daughter
+
+
+def getHeadPos(node):
+    return int(node.split("~")[3])
+
+# retrieve head daughter
+
+
+def getHead(node):
+    return rules[node][getHeadPos(node)-1]
+
+
+def isHeadNode(node, head):
+    return node == getHead(head)
+
+# function to check if a rule contains daughters of a certain category
+# return the list of daughters if yes
+# rules is a dictionary with heads as keys and list of daughters as values
+
+
+def hasNode(head, category, rules):
+    nodeList = []
+    for element in rules[head]:
+        if getCat(element) == category:
+            nodeList.append(element)
+    return nodeList
+
+
+def hasNonFragNode(head, category, rules):
+    nodeList = []
+    for element in rules[head]:
+        if getCat(element) == category:
+            if not isHead(element):
+                nodeList.append(element)
+            elif not hasNode(element, "FRAG", rules):
+                nodeList.append(element)
+    return nodeList
+
+
+def hasNodeLex(head, category, word, rules):
+    daughters = rules[head]
+    nodeList = []
+    for element in daughters:
+        if getCat(element) == category and getLex(element) == word:
+            nodeList.append(element)
+    return nodeList
+
+# a less strict version of hasNode()
+# retrieves all daughters of the major category
+
+
+def hasCat(head, category, rules):
+    nodeList = []
+    for element in rules[head]:
+        eleCat = getCat(element)
+        if category in eleCat and eleCat.index(category) == 0:
+            nodeList.append(element)
+    return nodeList
+
+
+def hasCatA(head, category, rules):
+    nodeAList = []
+    nodeList = hasCat(head, category, rules)
+    for node in nodeList:
+        if "-A" in getCat(node):
+            nodeAList.append(node)
+    return nodeAList
+
+# function to check if a subject NP is the subject of main verb
+
+
+def isMainSubj(subj, subjs, mother):
+    if getCat(subjs[subj]) == "TOP" or getCat(subjs[subj]) == "S" or (getCat(subjs[subj]) == "S-A" and getCat(subj)[-2:] == "-A"):
+        return 1
+    S_Aholder = 0
+    if mother.has_key(subjs[subj]):
+        SMother = mother[subjs[subj]]
+        if getCat(SMother) == "S-A":
+            S_Aholder = 1
+        while subjs[SMother] == subj:
+            SMother = mother[SMother]
+            if getCat(SMother) == "S-A":
+                S_Aholder = 1
+        if getCat(SMother) == "TOP" or getCat(SMother) == "S" or (S_Aholder and getCat(subj)[-2:] == "-A"):
+            return 1
+    return 0
+
+# function to check if an object NP is the object of main verb
+
+
+def isMainObj(obj, objs, mother):
+    if getCat(objs[obj]) == "TOP" or getCat(objs[obj]) == "S" or (getCat(objs[obj]) == "S-A" and getCat(obj)[-2:] == "-A"):
+        return 1
+    S_Aholder = 0
+    if mother.has_key(objs[obj]):
+        SMother = mother[objs[obj]]
+        if getCat(SMother) == "S-A":
+            S_Aholder = 1
+        while objs[SMother] == obj:
+            SMother = mother[SMother]
+            if getCat(SMother) == "S-A":
+                S_Aholder = 1
+        if getCat(SMother) == "TOP" or getCat(SMother) == "S" or (S_Aholder and getCat(obj)[-2:] == "-A"):
+            return 1
+    return 0
+
+# check if S node is top-level S node
+
+
+def isTopS(node, mother):
+    if mother.has_key(node) and getCat(mother[node]) == "TOP":
+        return 1
+    return 0
+
+# this checks if an NP node contains a DET-POSS, N-N-MOD, or PP subj/obj
+# checklist is a list of possible subjs or objs of the verb
+
+
+def checkNPPoss(NPNode, rules, checklist):
+    headpos = getHeadPos(NPNode)
+    if "DET-POSS" in checklist:
+        if hasNode(NPNode, "PRP$", rules) or hasNode(NPNode, "POS", rules):
+            return 1
+        elif hasNode(NPNode, "NPB", rules):
+            for node in hasNode(NPNode, "NPB", rules):
+                if getLex(node) == "'s":
+                    return 1
+    return 0
+
+
+def checkNPPP(NPNode, rules, checklist):
+    headpos = getHeadPos(NPNode)
+    if hasNode(NPNode, "PP", rules):
+        for node in hasNode(NPNode, "PP", rules):
+            if "PP-"+getLex(node) in checklist:
+                return 1
+    return 0
+
+
+def checkNPNN(NPNode, rules, checklist):
+    headpos = getHeadPos(NPNode)
+    if "N-N-MOD" in checklist:
+        if headpos > 1 and getCat(rules[NPNode][headpos-2]) == "NN":
+            return 1
+    return 0
+
+# function to check if a subject or object NP is a nominalizatoin
+# first check if head of NP is a nominalization
+# then check if nominalization incorporates subj/obj role of verb
+# then check if its subj or obj is realized
+# this requires both subj and obj to be realized
+# to require only one or the other, uncomment the lines
+
+
+def isNom(NPhead, rules):
+    headN = getLex(NPhead)
+    hasPossSubj = hasPPSubj = hasNNSubj = 0
+    hasPossObj = hasPPObj = hasNNObj = 0
+    hasSubj = hasObj = 0
+    if not nomdict.has_key(headN):
+        return 0
+    elif len(rules[NPhead]) == 1:
+        return 0
+#    elif nosubj.has_key(headN) or noobj.has_key(headN):
+#        return 1
+    else:
+        x = nomsubj.get(headN)
+        if x == None:
+            x = []
+        y = nomobj.get(headN)
+        if y == None:
+            y = []
+        newHead = NPhead
+        headwordCat = getCat(newHead)
+        while headwordCat[:2] != "NN" and rules.has_key(newHead) and "~" in newHead:
+            if checkNPPoss(newHead, rules, x):
+                hasPossSubj = 1
+            if checkNPPP(newHead, rules, x):
+                hasPPSubj = 1
+            if checkNPNN(newHead, rules, x):
+                hasNNSubj = 1
+            if checkNPPoss(newHead, rules, y):
+                hasPossObj = 1
+            if checkNPPP(newHead, rules, y):
+                hasPPObj = 1
+            if checkNPNN(newHead, rules, y):
+                hasNNObj = 1
+            if newHead == "NPB~introduction~3~3~3~2":
+                print newHead
+                print rules[newHead]
+            newHead = getHead(newHead)
+            headwordCat = getCat(newHead)
+        if hasPossSubj or hasPPSubj or hasNNSubj:
+            hasSubj = 1
+        if hasPPSubj or hasPPObj:
+            return 1
+    return 0
+
+# time nouns
+
+
+def isDefTimeN(lex):
+    if lex.lower() in ["today", "tonight", "yesterday", "tomorrow", "january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]:
+        return 1
+    return 0
+
+
+def isTimeN(lex):
+    if lex.lower() in ["afternoon", "evening", "morning", "noon", "day", "week", "month", "year", "decade", "century"]:
+        return 1
+    return 0
+
+# check if time noun has one of the following determiners
+
+
+def hasDet(node, rules):
+    if rules.has_key(node):
+        for daughter in rules[node]:
+            if getLex(daughter) in ["the", "this", "that", "last", "next", "these", "those"]:
+                return 1
+    return 0
+
+# forms of BE
+# however check contractions
+
+
+def isBe(lex):
+    if lex.lower() in ["be", "is", "am", "are", "was", "were", "been", "being", "'s", "'re", "'m"]:
+        return 1
+    return 0
+
+# forms of HAVE
+
+
+def isHave(lex):
+    if lex.lower() in ["have", "has", "had", "having", "'ve", "'d"]:
+        return 1
+    return 0
+
+# forms of DO
+
+
+def isDo(lex):
+    if lex.lower() in ["do", "does", "did", "done", "doing"]:
+        return 1
+    return 0
+
+# forms of GET
+
+
+def isGet(lex):
+    if lex.lower() in ["get", "gets", "got", "gotten", "getting"]:
+        return 1
+    return 0
+
+
+def isFeel(lex):
+    if lex.lower() in ["feel", "feels", "felt", "feeling"]:
+        return 1
+    return 0
+
+# list of verbs taking PP complements
+
+
+def isCompVerb(lex):
+    if lex.lower() in ["put", "puts", "putting", "set", "sets", "setting", "deem", "deems", "deemed", "deeming", "leave", "leaves", "left", "leaving", "name", "names", "named", "naming", "mark", "marks", "marked", "marking"]:
+        return 1
+    return 0
+
+
+def isPP(lex):
+    if lex.lower() in ["including", "according"]:
+        return 1
+    return 0
+
+# typos in oral transcriptions
+
+
+def isTypo(lex):
+    if lex.lower() in ["wont"]:
+        return 1
+    return 0
+
+# BE, HAVE, DO
+
+
+def isAux(lex):
+    if isBe(lex) or isHave(lex) or isDo(lex) or isTypo(lex):
+        return 1
+    return 0
+
+
+def isSingleNode(node):
+    daughters = rules[node]
+    while len(daughters) == 1 and isHead(daughters[0]):
+        daughters = rules[daughters[0]]
+    return len(daughters) == 1
+
+# checks whether node has a certain type of preverbal node
+
+
+def hasPreVPNode(head, cat, rules):
+    dlist = rules[head]
+    preVPNodes = []
+    catList = hasNode(head, cat, rules)
+    vpList = hasCat(head, "VP", rules)
+    if catList and vpList:
+        firstVP = vpList[0]
+        for catNode in catList:
+            if dlist.index(catNode) < dlist.index(firstVP):
+                preVPNodes.append(catNode)
+    return preVPNodes
+
+
+def hasPreVPCat(head, cat, rules):
+    dlist = rules[head]
+    preVPCats = []
+    catList = hasCat(head, cat, rules)
+    vpList = hasCat(head, "VP", rules)
+    if catList and vpList:
+        firstVP = vpList[0]
+        for catNode in catList:
+            if dlist.index(catNode) < dlist.index(firstVP):
+                preVPCats.append(catNode)
+    return preVPCats
+
+# checks whether node has a certain type of preverbal argument
+
+
+def hasPreVPCatA(head, cat, rules):
+    preVPCatA = []
+    preVPCat = hasPreVPCat(head, cat, rules)
+    if preVPCat:
+        for catNode in preVPCat:
+            if "-A" in getCat(catNode):
+                preVPCatA.append(catNode)
+    return preVPCatA
+
+
+def isFiniteV(verb):
+    return getCat(verb) in ["MD", "VBD", "VBP", "VBZ"]
+
+
+def isNonFiniteV(verb):
+    return getCat(verb) in ["VBG", "VBN"]
+
+
+def hasSubj(head):
+    if hasPreVPCat(head, "NP", rules):
+        return 1
+    elif hasPreVPCatA(head, "S", rules):
+        return 1
+    elif len(hasPreVPCat(head, "S", rules)) == 1:
+        return 1
+    else:
+        ds = rules[head]
+        if len(ds) == 2 and getCat(ds[0])[:2] == "NP" and getCat(ds[1]) == "ADJP":
+            return 1
+    return 0
+
+
+def isNPGranD(head, mother):
+    npMother = mother[head]
+    while getCat(npMother)[:2] == "NP" and mother.has_key(npMother):
+        npMother = mother[npMother]
+    if getCat(npMother) == "PP" and mother.has_key(npMother):
+        npGranma = mother[npMother]
+        if getCat(npGranma)[:2] == "NP":
+            return npGranma
+    return 0
+
+
+def hasTagSINV(head, rules):
+    ds = rules[head]
+    if len(ds) >= 3 and getCat(ds[-2]) == "VP" and getCat(ds[-1]) == "NPB":
+        if isAux(getLex(ds[-2])) and isSingleNode(ds[-1]) and getCat(rules[ds[-1]][0]) == "PRP":
+            return 1
+    return 0
+
+# ============getScore====================================================
+# function to score an individual rule in parse tree
+
+
+def getScore(head, rules, scores, subjs, mother):
+    daughters = rules[head]
+    scores = []
+
+    # rules with exactly one daughter
+    if len(daughters) == 1:
+        return 0
+
+    elif head[:3] == "TOP":
+        if len(rules[head]) == 2 and hasPreVPNode(head, "S", rules) and hasNode(head, "VP", rules):
+            scores.append(3)
+        elif head == "TOP~1~1" and len(rules[head]) >= 10:
+            scores.append(7)
+
+    elif head[0] == "S":
+
+        # 6b - embedded clause as subject; H2 in paper
+        if not (getCat(head) == "SG" and isTopS(head, mother)) and hasNode(head, "VP", rules) and not hasCat(head, "NP", rules) and ((len(hasPreVPCat(head, "S", rules)) == 1 and not isSingleNode(hasPreVPCat(head, "S", rules)[0])) or (hasPreVPCatA(head, "S", rules) and not isSingleNode(hasPreVPCatA(head, "S", rules)[0]))):
+            scores.append(6)
+
+        # 5a - sentences joined by a subordinating conjunction; H3 in paper
+        if hasNonFragNode(head, "SBAR", rules) and ((hasNode(head, "VP", rules) and (hasPreVPCat(head, "NP", rules) or hasPreVPCatA(head, "S", rules))) or hasNode(head, "S", rules)):
+            scores.append(5)
+
+        if hasNode(head, "IN", rules) and getLex(hasNode(head, "IN", rules)[0]) == "so" and hasNode(head, "S-A", rules) and not (isTopS(head, mother) and len(hasCat(head, "S", rules)) == 1):
+            scores.append(5)
+
+        # 5b - non-finite clauses in adjunct positions; H4
+        if hasNode(head, "SG", rules) and hasNode(head, "VP", rules) and ((hasPreVPCat(head, "NP", rules) or hasPreVPCatA(head, "S", rules)) or (getCat(head) == "SINV" and hasNode(head, "NP", rules) and hasPreVPCat(head, "S", rules))):
+            scores.append(5)
+
+        # 5b - non-finite clauses in adjunct positions
+        if hasNode(head, "PP", rules):
+            for ppNode in hasNode(head, "PP", rules):
+                if hasNode(ppNode, "SG-A", rules):
+                    scores.append(5)
+                elif getCat(rules[ppNode][getHeadPos(ppNode)-1])[:2] == "VB" and not isPP(getLex(ppNode)):
+                    scores.append(5)
+
+        # 3c - finite-clause as object of main verb
+        if hasPreVPCat(head, "S-A", rules) or (getCat(head) == "SINV" and ((hasPreVPNode(head, "S", rules) and not hasTagSINV(head, rules)) or (hasPreVPCat(head, "NP", rules) and hasNode(head, "S", rules)))):
+            scores.append(3)
+
+        if hasCat(head, "PRN", rules) and getCat(rules[hasCat(head, "PRN", rules)[0]][0]) == "S":
+            scores.append(3)
+
+        # 2b - sentences conjoined with coordinating conjunction; H5
+        if hasNode(head, "CC", rules) and len(hasCat(head, "S", rules)) > 1:
+            ccNodes = hasNode(head, "CC", rules)
+            sNodes = hasCat(head, "S", rules)
+            indexTrack = 0
+            for ccNode in ccNodes:
+                ccNodeIndex1 = daughters[indexTrack:].index(ccNode)
+                ccNodeIndex = ccNodeIndex1+indexTrack
+                indexTrack += ccNodeIndex1+1
+                postSNode = preSNode = 0
+                for sNode in sNodes:
+                    if not getCat(sNode) == "SBAR":
+                        if ccNodeIndex > daughters.index(sNode):
+                            preSNode = 1
+                        else:
+                            postSNode = 1
+                if preSNode == postSNode == 1:
+                    scores.append(2)
+
+        # 2c - conjoined adverbial construction; H6
+        if getCat(head) == "SBARQ" and hasNode(head, "CC", rules) and len(hasNode(head, "WHADVP", rules)) > 1:
+            ccNodes = hasNode(head, "CC", rules)
+            whNodes = hasNode(head, "WHADVP", rules)
+            indexTrack = 0
+            for ccNode in ccNodes:
+                ccNodeIndex1 = daughters[indexTrack:].index(ccNode)
+                ccNodeIndex = ccNodeIndex1+indexTrack
+                indexTrack += ccNodeIndex1+1
+                postWhNode = preWhNode = 0
+                for whNode in whNodes:
+                    if ccNodeIndex > daughters.index(whNode):
+                        preWhNode = 1
+                    else:
+                        postWhNode = 1
+                if preWhNode == postWhNode == 1:
+                    scores.append(2)
+
+    # ===============NP========================================
+    elif head[:2] == "NP":
+        if hasNodeLex(head, "SBAR", "than", rules) or hasNodeLex(head, "PP", "than", rules):
+            scores.append(4)
+        if (hasCat(head, "S", rules) and not (len(hasCat(head, "S", rules)) == 1 and hasNodeLex(head, "SBAR", "than", rules))) or hasNode(head, "VP", rules) or isNom(head, rules):
+            mHead = mother[head]
+            # 6a - relative clause modifying subject of main verb: H7
+            if (subjs[head] != "" and isMainSubj(head, subjs, mother)) or (isNPGranD(head, mother) and subjs[isNPGranD(head, mother)] != "" and isMainSubj(isNPGranD(head, mother), subjs, mother)):
+                scores.append(6)
+            elif mHead[:2] == "NP" and hasNode(mHead, "CC", rules) and subjs[mHead] != "" and isMainSubj(mHead, subjs, mother):
+                scores.append(6)
+            # 3a - relative clause modifying object of main verb: H10
+            elif objs[head] != "" or (isNPGranD(head, mother) and objs[isNPGranD(head, mother)] != ""):
+                scores.append(3)
+            elif mHead[:2] == "NP" and hasNode(mHead, "CC", rules) and objs[mHead] != "":
+                scores.append(3)
+
+        if hasCat(head, "NP", rules):
+            headNP = getHead(head)
+            npNodes = hasCat(head, "NP", rules)
+            for npNode in npNodes:
+                if npNode == headNP and (hasCat(npNode, "S", rules) or hasNode(npNode, "VP", rules)):
+                    if subjs[head] != "":
+                        scores.append(6)
+                    elif objs[head] != "":
+                        scores.append(3)
+                if daughters.index(headNP) == daughters.index(npNode)-1:
+                    if hasCat(npNode, "S", rules) or hasNode(npNode, "VP", rules):
+                        # 6a - appositional clause modifying subject of main verb: H8
+                        if (subjs[head] != "" and isMainSubj(head, subjs, mother)) or(isNPGranD(head, mother) and subjs[isNPGranD(head, mother)] != "" and isMainSubj(isNPGranD(head, mother), subjs, mother)):
+                            scores.append(6)
+                        # 3a - appositional clause modifying object of main verb: H11
+                        elif objs[head] != "" or (isNPGranD(head, mother) and objs[isNPGranD(head, mother)] != ""):
+                            scores.append(3)
+
+        # 6a relative clause modifying subject NP
+        if hasNode(head, "ADJP", rules):
+            for adjNode in hasNode(head, "ADJP", rules):
+                if hasNode(adjNode, "SBAR", rules):
+                    if (subjs[head] != "" and isMainSubj(head, subjs, mother)) or(isNPGranD(head, mother) and subjs[isNPGranD(head, mother)] != "\
+" and isMainSubj(isNPGranD(head, mother), subjs, mother)):
+                        scores.append(6)
+                    # 3a - appositional clause modifying object of main verb: H11
+                    elif objs[head] != "" or (isNPGranD(head, mother) and objs[isNPGranD(head, mother)] != ""):
+                        scores.append(3)
+
+        if hasNode(head, "CC", rules):
+            ccNodes = hasNode(head, "CC", rules)
+            i = 0
+            while i < len(ccNodes):
+                if getLex(ccNodes[i]) == "&":
+                    del ccNodes[i]
+                i += 1
+            indexTrack = 0
+            for ccNode in ccNodes:
+                ccNodeIndex1 = daughters[indexTrack:].index(ccNode)
+                ccNodeIndex = ccNodeIndex1+indexTrack
+                indexTrack += ccNodeIndex1+1
+                preNNode = postNNode = 0
+                preJJNode = postJJNode = 0
+                for daughter in daughters:
+                    # 2a - conjoined noun phrases in subject position: H13
+                    if getCat(daughter)[0] == "N":
+                        if daughters.index(daughter) < ccNodeIndex:
+                            preNNode = 1
+                        else:
+                            postNNode = 1
+                    # 2c - conjoined adjectival construction: H14
+                    elif getCat(daughter)[0] == "J":
+                        if daughters.index(daughter) < ccNodeIndex:
+                            preJJNode = 1
+                        else:
+                            postJJNode = 1
+                if (preNNode and postNNode and (subjs[head] != "" or (mother.has_key(head) and isNPGranD(head, mother) and subjs[isNPGranD(head, mother)] != ""))) or (preJJNode and postJJNode):
+                    scores.append(2)
+
+    # ===============VP======================================
+    elif head[:2] == "VP":
+        headPos = getHeadPos(head)
+
+        # exception 3a
+        if hasNode(head, "UCP", rules):
+            ucpNode = hasNode(head, "UCP", rules)[0]
+            if hasNode(ucpNode, "CC", rules):
+                if hasNode(ucpNode, "SBAR", rules) or (hasCat(ucpNode, "NP", rules) and isNom(hasCat(ucpNode, "NP", rules)[0], rules)):
+                    scores.append(3)
+
+        # 5a - sentence joined by a subordinating conjunction: H15
+        if hasNonFragNode(head, "SBAR", rules):
+            scores.append(5)
+        if hasNode(head, "ADVP", rules):
+            for advNode in hasNode(head, "ADVP", rules):
+                if hasNode(advNode, "SBAR", rules):
+                    scores.append(5)
+
+        # 5b - non-finite clause in adjunct position: H16
+        if hasNode(head, "SG", rules):
+            scores.append(5)
+        if hasNode(head, "PP", rules):
+            ppNodes = hasNode(head, "PP", rules)
+            for ppNode in ppNodes:
+                ppNodeIndex = daughters.index(ppNode)
+                if hasNode(ppNode, "SG-A", rules) or hasNode(ppNode, "S-A", rules):
+                    # 1b - feel like doing: exception
+                    if getLex(ppNode) == "like" and isFeel(getLex(head)) and getHeadPos(head) == daughters.index(ppNode):
+                        scores.append(1)
+                    else:
+                        scores.append(5)
+                elif getCat(rules[ppNode][getHeadPos(ppNode)-1])[:2] == "VB" and not isPP(getLex(ppNode)):
+                    scores.append(5)
+
+                # 3e - raising: H18
+                elif ppNodeIndex == headPos and len(daughters) > headPos+1 and getLex(ppNode) == getLex(daughters[headPos+1]) == "to" and getCat(daughters[headPos+1]) == "SBAR-A":
+                    scores.append(3)
+
+        if hasCatA(head, "S", rules):
+            sNode = hasCatA(head, "S", rules)[0]
+
+            # 4a - non-finite complement with own understood subject: H17a
+            if hasSubj(sNode) and subjs[head] != subjs[sNode] and (isHave(getLex(head)) or not isAux(getLex(head))) and not isFiniteV(getCat(getTerminal(sNode))):
+                scores.append(4)
+
+            elif getCat(sNode) == "S-A" and hasNode(sNode, "ADJP", rules) and hasNode(sNode, "SBAR-A", rules):
+                scores.append(4)
+                scores.append(3)
+
+            # 3c - finite clause as object of main verb: H20
+            elif not isSingleNode(sNode) and (getCat(sNode) == "SBAR-A" or (isFiniteV(getCat(getTerminal(sNode))) and (isBe(getLex(head)) or not isAux(getLex(head))))):
+                scores.append(3)
+
+            # 1a - infinitive complement with same subject as main verb: H21
+            elif getLex(head).lower() not in ["going", "about", "used", "got", "get", "gets"] and not isAux(getLex(head)) and getLex(sNode) == "to" and not isSingleNode(sNode):
+                if hasCat(head, "NP", rules) and getCat(sNode) == "SG-A":
+                    scores.append(4)
+                else:
+                    scores.append(1)
+
+            # 1b - ing complement with same subject as main verb: H22
+            elif not hasSubj(sNode) and getLex(sNode)[-3:] == "ing" and not isAux(getLex(head)) and getCat(rules[sNode][getHeadPos(sNode)-1])[0] == "V":
+                scores.append(1)
+
+        # 4a - non-finite complement with its own understood subject: H17b,c,d
+        if len(daughters) > (headPos+1) and getCat(daughters[headPos])[:2] == "NP" and not isAux(getLex(head)):
+            postNPNode = daughters[headPos+1]
+            postNPCat = getCat(postNPNode)
+            if postNPCat[:2] == "NP" and not isDefTimeN(getLex(postNPNode)) and not (isTimeN(getLex(postNPNode)) and hasDet(postNPNode, rules)):
+                scores.append(4)
+            elif postNPCat == "ADJP":
+                scores.append(4)
+            elif postNPCat == "PP" and (not (getLex(postNPNode) == "since" or isSingleNode(postNPNode))) and (isCompVerb(getLex(head)) or getLex(postNPNode) == "into"):
+                scores.append(4)
+
+        # 2c - conjoined verbal constructions: H20
+        if hasNode(head, "CC", rules):
+            ccNodes = hasNode(head, "CC", rules)
+            indexTrack = 0
+            for ccNode in ccNodes:
+                ccNodeIndex1 = daughters[indexTrack:].index(ccNode)
+                ccNodeIndex = ccNodeIndex1+indexTrack
+                indexTrack += ccNodeIndex1+1
+                preVNode = postVNode = 0
+                for daughter in daughters:
+                    if getCat(daughter)[0] == "V":
+                        if daughters.index(daughter) < ccNodeIndex:
+                            preVNode = 1
+                        else:
+                            postVNode = 1
+                if preVNode and postVNode:
+                    scores.append(2)
+
+        # 1 - ing complement with same subject as main verb: H22
+        elif hasNode(head, "VP-A", rules) and not isAux(getLex(head)):
+            vpLex = getLex(hasNode(head, "VP-A", rules)[0])
+            if vpLex[-3:] == "ing":
+                scores.append(1)
+
+    # ===============QP,ADJP,ADVP==================================
+    elif head[:2] == "QP" and hasNode(head, "IN", rules):
+        for ppNode in hasNode(head, "IN", rules):
+            if getLex(ppNode) == "than":
+                scores.append(4)
+
+    elif head[:4] in ["ADJP", "ADVP"]:
+        # 4b - comparative with object of comparison: H23a
+        if hasNode(head, "PP", rules) or hasNode(head, "SBAR", rules):
+            ppNodes = hasNode(head, "PP", rules)+hasNode(head, "SBAR", rules)
+            for ppNode in ppNodes:
+                ppNodeIndex = daughters.index(ppNode)
+                # 4b - comparative with object of comparison: H23a
+                if getLex(ppNode) == "than":
+                    scores.append(4)
+                    break
+                # 4b - comparative with object of comparison: H23b
+                elif getLex(ppNode) == "as":
+                    if hasNode(head, "RB", rules):
+                        rbNodes = hasNode(head, "RB", rules)
+                        jjNodes = hasCat(head, "JJ", rules)
+                        for rbNode in rbNodes:
+                            rbNodeIndex = daughters.index(rbNode)
+                            if getLex(rbNode) in ["as", "so"]:
+                                if not rbNodes[-1] == rbNode:
+                                    scores.append(4)
+                                    break
+                                elif jjNodes:
+                                    for jjNode in jjNodes:
+                                        jjNodeIndex = daughters.index(jjNode)
+                                        if rbNodeIndex < jjNodeIndex < ppNodeIndex:
+                                            scores.append(4)
+                                            break
+                    if hasNodeLex(head, "ADVP", "as", rules):
+                        scores.append(4)
+
+        # 3d - subject extraposition: H24
+        if getCat(head) == "ADJP" and hasNode(head, "SBAR", rules):
+            for sbarNode in hasNode(head, "SBAR", rules):
+                if hasNode(sbarNode, "S-A", rules):
+                    for saNode in hasNode(sbarNode, "S-A", rules):
+                        if getLex(saNode) == "to":
+                            scores.append(3)
+
+        # 2c - conjoined adjectival or adverbial construction
+        if hasNode(head, "CC", rules):
+            ccNodes = hasNode(head, "CC", rules)
+            indexTrack = 0
+            for ccNode in ccNodes:
+                ccNodeIndex1 = daughters[indexTrack:].index(ccNode)
+                ccNodeIndex = ccNodeIndex1+indexTrack
+                indexTrack += ccNodeIndex1+1
+                preAdjNode = postAdjNode = 0
+                preAdvNode = postAdvNode = 0
+                for daughter in daughters:
+                    # 2c - conjoined adjectival construction: H25
+                    if "J" in getCat(daughter):
+                        if daughters.index(daughter) < ccNodeIndex:
+                            preAdjNode = 1
+                        else:
+                            postAdjNode = 1
+                    # 2c - conjoined adverbial construction: H26
+                    elif getCat(daughter) in ["ADVP", "RB"]:
+                        if daughters.index(daughter) < ccNodeIndex:
+                            preAdvNode = 1
+                        else:
+                            postAdvNode = 1
+                if (preAdjNode and postAdjNode) or (preAdvNode and postAdvNode):
+                    scores.append(2)
+
+    scale = 0
+    for score in scores:
+        if score != 0 and score != scale:
+            if scale == 0:
+                scale += score
+            else:
+                scale = 7
+                break
+    return scale
+
+
+def getComplexity(scores):
+    complexity = 0
+    for key in scores.keys():
+        if scores[key] != 0:
+            if complexity == 0:
+                complexity = scores[key]
+            elif complexity != scores[key]:
+                return 7
+    return complexity
+
+
+# ======================main=====================================
+print "Filename, Sentences, Level0, Level1, Level2, Level3, Level4, Level5, Level6, Level7, MeanLevel"
+directoryPath = sys.argv[1]
+for filename in glob.glob(os.path.join(directoryPath, '*.m2')):
+    infilename = filename+"parses"
+    command = "egrep \"\(TOP\" " + filename + " > " + infilename
+    os.system(command)
+    infile = open(infilename, "r")
+
+    scorelist = []
+    line = infile.readline()
+    while line:
+
+        p = re.compile('\( (?P<name> [0-9a-z]*) \)', re.VERBOSE)
+        line = p.sub(r'\g<1>', line)
+
+        # groups is a list that contains all rules at one level
+        # done by extracting everything between parenthesis
+        groups = re.findall('\([^\(\)]*\)', line)
+
+        # level is the level of depth of the rule in the tree, 1 is lowest
+        level = 1
+
+        # heads is a list of heads ordered first by level and then by linear order in level
+        # a head looks like this:
+        # headLabel~headWord~total#_of_children~headConstituent_#~levelOfDepth~orderInLevel
+        heads = []
+
+        # rules is a dictionary with heads as keys and lists of daughters as values
+        # e.g., rules[head1]=[child1, child2,...]
+        rules = {}
+
+        # scores is a dictionary with heads as keys and numeric scores of the rules
+        # that indicate their complexity as values
+        scores = {}
+
+        # subjs is a dictionary with head as keys and their subjects as values
+        subjs = {}
+
+        # objs is a dictionary with head as keys and their objects as values
+        objs = {}
+
+        # mother is a dictionay with nodes as keys and their mothers as values
+        mother = {}
+        while groups != []:
+            # subheads is a list of heads in a given level only
+            subheads = []
+
+            # order is the linear order of the rule among all rules in the level
+            order = 1
+
+            # process rules in groups one by one
+            for group in groups:
+                grouplist = group.split()
+
+                # add the level and order number to the end of head
+                head = grouplist[0][1:]+"~"+str(level)+"~"+str(order)
+                line = line.replace(group, head, 1)
+                subjs[head] = ""
+                objs[head] = ""
+                subheads.append(head)
+                grouplist.pop()
+                # ignore punctuation node in rule
+                if grouplist and re.findall('PUNC', grouplist[-1]):
+                    grouplist.pop()
+                daughters = grouplist[1:]
+                rules[head] = daughters
+                for element in daughters:
+                    mother[element] = head
+                    if "NP" in element:
+                        if head[0] == "S":
+                            if getCat(head) == "SBARQ" and hasNode(head, "SQ", rules):
+                                subjs[hasNode(head, "SQ", rules)[0]] = element
+                                subjs[element] = hasNode(head, "SQ", rules)[0]
+                            elif getCat(head) == "SQ":
+                                if hasCat(head, "V", rules):
+                                    vpNode = hasCat(head, "V", rules)[0]
+                                    if daughters.index(vpNode) > daughters.index(element):
+                                        subjs[head] = element
+                                        subjs[vpNode] = element
+                                        subjs[element] = vpNode
+                                    else:
+                                        objs[head] = element
+                                        objs[vpNode] = element
+                                        objs[element] = vpNode
+                                else:
+                                    subjs[element] = head
+                            elif hasCat(head, "V", rules) and not element in hasPreVPCat(head, "NP", rules):
+                                if getCat(head) == "SINV":
+                                    subjs[element] = head
+                                else:
+                                    objs[head] = element
+                                    objs[element] = head
+                            elif (hasCat(head, "S", rules) or hasCat(head, "V", rules) or getCat(head) == "S-A") and not (isDefTimeN(getLex(element)) and len(hasPreVPCat(head, "NP", rules)) > 1):
+                                subjs[head] = element
+                                subjs[element] = head
+                        elif head[:2] == "VP":
+                            objs[head] = element
+                            objs[element] = head
+                # replace processed rule with its head
+                # line=line.replace(group,head)
+                order += 1
+            subheads.reverse()
+            for head in subheads:
+                heads.append(head)
+            level += 1
+            groups = re.findall('\([^\(\)]*\)', line)
+
+        for head in heads:
+            # find sujb of VPs - same as subj of mother S
+            if subjs[head] == "" and head[:1] in ["V", "S"] and mother.has_key(head):
+                gMother = mother[head]
+                while subjs[gMother] == "" and mother.has_key(gMother):
+                    gMother = mother[gMother]
+                subjs[head] = subjs[gMother]
+
+            # find obj of S and VPs
+            if head[:1] == "V" and objs[head] != "" and mother.has_key(head):
+                gMother = mother[head]
+                while objs[gMother] == "" and (gMother[:1] == "S" or (gMother[:2] == "VP" and (getCat(rules[gMother][0]) == "MD" or isAux(getLex(gMother))))):
+                    objs[gMother] = objs[head]
+
+        heads.reverse()
+
+        for head in heads:
+            scores[head] = getScore(head, rules, scores, subjs, mother)
+        finalscore = getComplexity(scores)
+        scorelist.append(finalscore)
+        line = infile.readline()
+    infile.close()
+
+    scoreinfo = [0, 0, 0, 0, 0, 0, 0, 0]
+    scoretotal = 0
+    for score in scorelist:
+        scoreinfo[score] += 1
+        scoretotal += score
+    if not scorelist:
+        average = 0.00
+    else:
+        average = float(scoretotal)/len(scorelist)
+    average = "%.2f" % average
+    filename = filename.split("/")[-1]
+    output = filename+", "+str(len(scorelist))
+    for score in scoreinfo:
+        output += ", "+str(score)
+    output += ", "+str(average)
+    print output
+    command = "rm " + infilename
+    os.system(command)
