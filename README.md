@@ -1,4 +1,6 @@
-# Feature Extraction for RYSe
+# Feature Extraction for RYSe 
+
+RYSe is strategy that was designed to identidy a young (7-11 year old) searchs given their search queries
 
 
 The code in this folder is designed to extract the features from our data sets (search query). The following notebooks can be run in any order:
